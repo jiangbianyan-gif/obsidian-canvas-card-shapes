@@ -1,0 +1,10 @@
+{
+  "id": "canvas-card-shapes",
+  "name": "Canvas Card Shapes",
+  "version": "1.0.0",
+  "minAppVersion": "1.5.0",
+  "description": "Shape presets for Canvas cards: rounded, pill, ellipse, diamond, hexagon, parallelogram, star, folded note, plus the flowchart symbols used in logic diagrams (terminator, process, decision, input/output, document, database, delay).",
+  "author": "jiangbianyan-gif",
+  "authorUrl": "https://github.com/jiangbianyan-gif",
+  "isDesktopOnly": false
+}

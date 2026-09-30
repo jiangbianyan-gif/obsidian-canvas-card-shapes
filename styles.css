@@ -1,0 +1,334 @@
+/* ============================================================================
+   Canvas Card Shapes —— 卡片形状
+   ----------------------------------------------------------------------------
+   ★ 先看清楚 DOM（这套结构是从 obsidian.asar 里的 app.js 逐字读出来的，
+     不是猜的。搞错这一层整个插件会一点效果都没有）：
+
+       <div class="canvas-node">                 ← .canvas-node（0×0 锚点）
+         <div class="canvas-node-container">     ← 真正的可见卡片框
+           <div class="canvas-node-content">     ← 正文
+           <div class="canvas-node-placeholder"> ← 空卡片的提示字
+         </div>
+         <div class="canvas-node-label">         ← 卡片标签
+       </div>
+
+     · .canvas-node 是 position:absolute; width:0; height:0 的**锚点**，
+       真实宽高由 Obsidian 用内联样式写在它身上；圆角、描边、底色、阴影、
+       overflow、contain 全都在 container 上。
+       ⇒ 视觉属性必须打在 .canvas-node-container 上。打在 .canvas-node 上
+         不会有任何变化（那是个 0×0 的元素）。.canvas-node 上只放
+         --shapes-* 变量（变量是继承的，这正是我们要的）。
+
+     · 缩放手柄在 canvas 级的 .canvas-node-interaction-layer 里，不在卡片
+       内部 —— 所以对 container 做裁剪不影响拖拽/缩放。
+
+     · Obsidian 把卡片高度写在 --canvas-node-height 上，上下内边距用它按
+       比例算，宽高比再怎么变文字都不会顶到形状边上。
+
+   ----------------------------------------------------------------------------
+   ★★ 两条"静默失效"的坑，改这个文件之前先读 ★★
+
+   ① 裁剪类形状（clip-path）不能把 filter 挂在同一个元素上。
+      规范里 filter 先应用、clip-path 后应用
+        "first any filter effect is applied, then any clipping, masking and
+         opacity"（Filter Effects Level 1 §2）
+      ⇒ 同一个元素上 drop-shadow 画出来的阴影，会连同整个矩形一起被裁掉，
+        只剩一个没有阴影的平面形状（用 Chrome 无头截图实测确认过）。
+      ⇒ 正确做法：filter 挂 container（父级），clip-path 挂它的子元素。
+        这里用 .canvas-node-container::before 承载卡片底色 + 裁剪，
+        正文也裁一遍（不然长文字会从形状角上溢出去）。
+
+   ② Obsidian 的选中提示是一条 box-shadow 外圈，它会被 clip-path 一起裁掉。
+      所以裁剪类形状改用 accent 色的 drop-shadow 光晕（见文件末尾）。
+
+   ----------------------------------------------------------------------------
+   两类形状，各自的做法：
+
+     · 圆角族（border-radius）—— 直角矩形 / 圆角矩形 / 胶囊 / 椭圆 / 云形 /
+       文档 / 数据库 / 延时。
+       容器上本来就有描边和投影，圆角会自动跟着走，什么都不用补偿。
+       形状只声明 --shapes-radius。
+
+     · 裁剪族（clip-path）—— 菱形 / 平行四边形 / 六边形 / 八边形 / 三角形 /
+       星形 / 折角便签 / 手动输入 / 注释。
+       形状只声明 --shapes-clip，公共规则负责三件事：
+         · container 底色/描边/阴影全关掉（改由 ::before 画），
+         · container 上加 filter: drop-shadow（阴影顺着形状走），
+         · ::before / 正文 / 提示字按 --shapes-clip 裁一遍。
+       ⚠️ clip-path 只能裁形状、**不能描边**：多边形的轮廓线做不到（要描边
+          得再叠一层元素，那会破坏 Obsidian 的选中/拖动，不值得）。
+
+   ----------------------------------------------------------------------------
+   ★ 文字内边距：形状可以声明这四个变量
+
+       --shapes-pad-x   左右内边距（px 或 %，% 按卡片**宽度**算）
+       --shapes-pad-t   上内边距
+       --shapes-pad-b   下内边距
+       --shapes-pad-y   上下内边距（t/b 没给时用它）
+
+     形状"可用面积"小的（菱形 / 三角形 / 星形）会多留一截，字多了记得把
+     卡片拉大一点。
+
+   ★ 本文件刻意不含 has 伪类：Obsidian 目录的自动审核有 CSS LINT 一项会把它
+     判为警告；用类名选择器是等价的。连注释里都别写出它的完整字面形式 ——
+     构建脚本 tools/build.mjs 扫的是**原文**，注释里出现同样会报警告。
+   ============================================================================ */
+
+
+/* ══════════════════════════════════════════ ① 通用：正文内边距 ═══════════ */
+
+:root {
+  /* 插件会把这个值写到 <body> 上覆盖它（设置面板里的滑杆） */
+  --shapes-pad: 12px;
+}
+
+/* 有形状时给正文留出内边距，文字才不会贴着形状边。
+   ★ 卡片正文默认是 content-box，直接加 padding 会把 100%×100% 的盒子撑出
+     容器（被 overflow 裁掉，等于白留），所以必须 border-box。
+   ★ 分组卡片（.canvas-node-group）排除：它是装别的卡片的容器，
+     裁成形状会把里面的卡片一起藏掉。 */
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container > .canvas-node-content,
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container > .canvas-node-placeholder {
+  box-sizing: border-box;
+  padding: var(--shapes-pad-t, var(--shapes-pad-y, var(--shapes-pad)))
+           var(--shapes-pad-x, var(--shapes-pad))
+           var(--shapes-pad-b, var(--shapes-pad-y, var(--shapes-pad)))
+           var(--shapes-pad-x, var(--shapes-pad));
+}
+
+
+/* ══════════════════════════════════════════ ② 通用：正文垂直居中 ════════ */
+
+/* ★ 先说清楚：核心样式里正文的高度链是**完整的** ——
+     .canvas-node-content      height: 100%
+     .markdown-embed-content   height: 100%
+     .markdown-preview-view    height: 100%   ← 这条容易漏看，别以为断了
+   所以"居中"不用动布局链，只要把"谁去分剩余高度"这两条反过来：
+
+     · 核心的 .markdown-preview-sizer 是 flex: 1 0 0 —— 它把剩余高度**全吃掉**，
+       正文于是贴在顶上（上面只剩一个 16px 的占位块）。
+     · 核心那两个占位块 ::before/::after 是 flex: 1 1 0，但被 max-height: 16px 卡死。
+
+   把这两条一改：占位块放开上限、正文块不再抢高度 ⇒ 两个占位块均分剩余空间，
+   正文正好落在中间。
+   （Chrome 无头 + DOM 探针实测：改完占位块上下各 56px、偏差 0px；不改则是
+     "占位块被 16px 卡住 + sizer 吃掉剩下 128px"，正文贴顶。）
+
+   ★ 刻意**只改这两条**，不动 display / flex-direction：.canvas-node-content
+     底下还并排着编辑器和链接卡的 iframe，动布局链风险更大 —— 而且实测两条
+     和六条（含高度链手术）效果完全一样，甚至更好（见下）。
+
+   ★ 内容比卡片高时：两个占位块先缩到 0，正文自然从**顶边**开始排，
+     .markdown-preview-view 自带 overflow-y: auto，往下滚就能看全 ⇒ 一个字都不丢。
+     正因为这样，这里**绝对不能用 justify-content 居中** —— 内容超高时它会
+     把上半截顶出可视区且滚不到（经典缺陷）。本文件里一条 justify-content 都没有。 */
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container > .canvas-node-content .markdown-preview-sizer {
+  flex: 0 0 auto;
+}
+
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container > .canvas-node-content .markdown-preview-view::before,
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container > .canvas-node-content .markdown-preview-view::after {
+  flex: 1 1 0;
+  min-height: 0;
+  max-height: none;
+}
+
+
+/* ══════════════════════════════════════════ ③ 圆角族 ════════════════════ */
+
+/* 圆角族只需要一个 border-radius。没声明 --shapes-radius 的形状（都是裁剪族）
+   会拿到 --radius-m，和 Obsidian 原样一致 —— 反正那些容器是透明的。 */
+.canvas-node.has-shape:not(.canvas-node-group) > .canvas-node-container {
+  border-radius: var(--shapes-radius, var(--radius-m, 8px));
+}
+
+
+/* ══════════════════════════════════════════ ④ 裁剪族：公共补偿 ══════════ */
+
+/* ④-a 容器只负责"投影"：底色 / 描边 / 自带阴影全关掉。
+      ★ filter 必须在 container（父级）上，见文件头 ①。 */
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation) > .canvas-node-container {
+  background-color: transparent;
+  border-color: transparent;
+  box-shadow: none;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.22));
+}
+
+/* ④-b 形状由 --shapes-clip 一处声明，三处消费：卡片底色块、正文、空卡片提示字。
+      （正文和提示字也要裁，不然长文字会从形状的角上溢出去。） */
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation) > .canvas-node-container::before,
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation) > .canvas-node-container > .canvas-node-content,
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation) > .canvas-node-container > .canvas-node-placeholder {
+  clip-path: var(--shapes-clip);
+}
+
+/* ④-c 卡片底色块。z-index: -1 —— container 上有 filter，它自己就是一个层叠
+      上下文，所以这个负层级只会待在卡片内部，不会跑到白板底下去。
+      正文是 position:relative 的，永远压在它上面。 */
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation) > .canvas-node-container::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  background-color: var(--background-primary);
+}
+
+
+/* ══════════════════════════════════════════ ⑤ 形状表 ════════════════════ */
+
+/* 每个形状只声明自己的变量 —— 视觉属性一概不直接写，全部由上面的公共规则
+   消费。这样"一个形状"就只有一处定义，不会出现改了一处漏一处。 */
+
+/* ── 基础几何 ──────────────────────────────────────────────────────────── */
+
+.canvas-node.has-shape.shapes-square { --shapes-radius: 0; }
+
+.canvas-node.has-shape.shapes-round { --shapes-radius: 14px; }
+
+.canvas-node.has-shape.shapes-pill { --shapes-radius: 999px; }
+
+/* 椭圆：文字能用的只有中间那一大块，四边都要多留 */
+.canvas-node.has-shape.shapes-ellipse {
+  --shapes-radius: 50%;
+  --shapes-pad-x: 15%;
+  --shapes-pad-y: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.1);
+}
+
+/* 云形：四个方向的"圆角比例"凑出有机的弧度（斜杠前是水平半径、后是垂直半径） */
+.canvas-node.has-shape.shapes-blob {
+  --shapes-radius: 58% 42% 47% 53% / 52% 58% 42% 48%;
+  --shapes-pad-x: 9%;
+  --shapes-pad-y: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.08);
+}
+
+.canvas-node.has-shape.shapes-diamond {
+  --shapes-clip: polygon(50% 0, 100% 50%, 50% 100%, 0 50%);
+  --shapes-pad-x: 14%;
+  --shapes-pad-y: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.1);
+}
+
+.canvas-node.has-shape.shapes-pgram {
+  --shapes-clip: polygon(16% 0, 100% 0, 84% 100%, 0 100%);
+  --shapes-pad-x: 17%;
+}
+
+.canvas-node.has-shape.shapes-hexagon {
+  --shapes-clip: polygon(25% 0, 75% 0, 100% 50%, 75% 100%, 25% 100%, 0 50%);
+  --shapes-pad-x: 21%;
+}
+
+.canvas-node.has-shape.shapes-octagon {
+  --shapes-clip: polygon(28% 0, 72% 0, 100% 28%, 100% 72%, 72% 100%, 28% 100%, 0 72%, 0 28%);
+  --shapes-pad-x: 18%;
+  --shapes-pad-y: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.06);
+}
+
+/* 三角形：顶点在上、底边在下。上下留等量的话文字会撞到斜边，
+   所以把正文整体压到下半部分（--shapes-pad-t 大、--shapes-pad-b 小）。 */
+.canvas-node.has-shape.shapes-triangle {
+  --shapes-clip: polygon(50% 0, 100% 100%, 0 100%);
+  --shapes-pad-x: 24%;
+  --shapes-pad-t: calc(var(--canvas-node-height, 120px) * 0.42);
+  --shapes-pad-b: var(--shapes-pad);
+}
+
+.canvas-node.has-shape.shapes-star {
+  --shapes-clip: polygon(50% 0, 61% 35%, 98% 35%, 68% 57%, 79% 91%,
+                         50% 70%, 21% 91%, 32% 57%, 2% 35%, 39% 35%);
+  --shapes-pad-x: 24%;
+  --shapes-pad-y: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.04);
+}
+
+/* 折角便签：切掉右上角 */
+.canvas-node.has-shape.shapes-note {
+  --shapes-clip: polygon(0 0, 76% 0, 100% 24%, 100% 100%, 0 100%);
+  --shapes-pad-x: calc(var(--shapes-pad) + 4%);
+  --shapes-pad-t: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.06);
+}
+
+/* ── 流程图（编程逻辑示意图的标准符号） ────────────────────────────────── */
+
+/* 预定义处理（子程序）：直角矩形 + 两侧各一条内竖线。
+   竖线用 background-image 的线性渐变画 —— 它不碰 box-shadow，
+   所以卡片的投影、选中圈全都照常。
+   （用 inset 阴影画的话会把 box-shadow 整条覆盖掉，选中就看不出来了。） */
+.canvas-node.has-shape.shapes-predefined {
+  --shapes-radius: 0;
+  --shapes-pad-x: calc(var(--shapes-pad) + 18px);
+}
+
+.canvas-node.has-shape.shapes-predefined > .canvas-node-container {
+  background-image:
+    linear-gradient(var(--text-faint), var(--text-faint)),
+    linear-gradient(var(--text-faint), var(--text-faint));
+  background-size: 1px 100%, 1px 100%;
+  background-position: 12px 0, calc(100% - 12px) 0;
+  background-repeat: no-repeat;
+}
+
+/* 文档：底边是弧（标准符号是波浪底，这里用弧近似 —— 足够认出来） */
+.canvas-node.has-shape.shapes-document {
+  --shapes-radius: 4px 4px 46% 46% / 4px 4px 18% 18%;
+  --shapes-pad-x: calc(var(--shapes-pad) + 4%);
+  --shapes-pad-t: var(--shapes-pad);
+  --shapes-pad-b: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.12);
+}
+
+/* 数据库 / 存储：圆柱（上边缘一条椭圆弧） */
+.canvas-node.has-shape.shapes-database {
+  --shapes-radius: 50% 50% 6px 6px / 18% 18% 6px 6px;
+  --shapes-pad-x: calc(var(--shapes-pad) + 5%);
+  --shapes-pad-t: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.1);
+  --shapes-pad-b: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.05);
+}
+
+/* 手动输入：上边是斜的（左低右高），所以上面多留 */
+.canvas-node.has-shape.shapes-manual {
+  --shapes-clip: polygon(0 15%, 100% 0, 100% 100%, 0 100%);
+  --shapes-pad-x: calc(var(--shapes-pad) + 4%);
+  --shapes-pad-t: calc(var(--shapes-pad) + var(--canvas-node-height, 120px) * 0.12);
+}
+
+/* 延时 / 等待：右边是半圆 */
+.canvas-node.has-shape.shapes-delay {
+  --shapes-radius: 4px 999px 999px 4px;
+  --shapes-pad-x: calc(var(--shapes-pad) + 18px);
+}
+
+/* 注释：左边带一个缺口（像注释括号）。缺口在正中偏左，所以左右都要躲开它 */
+.canvas-node.has-shape.shapes-annotation {
+  --shapes-clip: polygon(0 0, 100% 0, 100% 100%, 0 100%, 6% 50%);
+  --shapes-pad-x: calc(var(--shapes-pad) + 5%);
+}
+
+
+/* ══════════════════════════════════════════ ⑥ 选中提示 ══════════════════ */
+
+/* 裁剪族的 box-shadow 被关掉了，Obsidian 原生的选中圈也就没了。这里用一圈
+   同色光晕代替，让"这张卡选中了 / 正在编辑"依然看得出来 —— 光晕是 filter
+   画的，顺着形状走。圆角族不受影响，还是原生描边 + 投影。 */
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation).is-selected > .canvas-node-container,
+.canvas-node.has-shape:is(
+    .shapes-diamond, .shapes-pgram, .shapes-hexagon, .shapes-octagon,
+    .shapes-triangle, .shapes-star, .shapes-note,
+    .shapes-manual, .shapes-annotation).is-focused > .canvas-node-container {
+  filter: drop-shadow(0 0 3px var(--color-accent)) drop-shadow(0 1px 3px rgba(0, 0, 0, 0.22));
+}

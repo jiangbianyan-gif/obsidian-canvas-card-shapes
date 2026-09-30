@@ -1,0 +1,24 @@
+{
+  "name": "obsidian-canvas-card-shapes",
+  "version": "1.0.0",
+  "description": "Shape presets for Obsidian Canvas cards.",
+  "author": "jiangbianyan-gif",
+  "license": "MIT",
+  "private": true,
+  "main": "main.js",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/jiangbianyan-gif/obsidian-canvas-card-shapes.git"
+  },
+  "scripts": {
+    "build": "node tools/build.mjs",
+    "release:zip": "node tools/build.mjs --zip",
+    "test": "node test/shapes.test.js && node test/build.test.mjs",
+    "check": "node --check main.js",
+    "check:manifest": "node tools/check-manifest.mjs",
+    "verify": "npm run check:manifest && npm run build && npm test"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
